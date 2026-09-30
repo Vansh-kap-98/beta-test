@@ -1,0 +1,23 @@
+{
+  "name": "beta-test-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Autonomous game beta-testing bot driven by a System One decision model with LLM escalation.",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test --test-reporter=dot test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "play": "node --experimental-strip-types src/cli/play.ts",
+    "replay": "node --experimental-strip-types src/cli/replay.ts",
+    "calibrate": "node --experimental-strip-types src/cli/calibrate.ts",
+    "build:web": "node demo/build-web.mjs",
+    "demo:web": "node demo/serve.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "@types/node": "^22.10.2"
+  }
+}

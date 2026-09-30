@@ -1,0 +1,154 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Genre Mode Simulator</title>
+<style>
+  html, body { margin: 0; background: #0d0d10; color: #eee;
+               font-family: system-ui, sans-serif; overflow: hidden; }
+  #stage { position: relative; width: 100vw; height: 100vh; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #hud { position: absolute; top: 12px; left: 16px; z-index: 5;
+         font-variant-numeric: tabular-nums; font-size: 15px;
+         text-shadow: 0 1px 3px #000; }
+  #menu { position: absolute; inset: 0; display: none; padding: 60px;
+          flex-direction: column; gap: 14px; }
+  #menu button { width: 240px; padding: 10px 16px; font-size: 16px; }
+  #dialogue { position: absolute; left: 8%; right: 8%; bottom: 10%; z-index: 6;
+              display: none; background: rgba(0,0,0,.75); border: 2px solid #556;
+              padding: 18px 22px; font-size: 18px; line-height: 1.5; }
+  .bar { position: absolute; left: 0; right: 0; height: 12%; background: #000;
+         display: none; z-index: 7; }
+  #barTop { top: 0; } #barBottom { bottom: 0; }
+  #modeTag { position: absolute; right: 16px; top: 12px; z-index: 8;
+             font-size: 13px; color: #8a8; }
+</style>
+
+<div id="stage">
+  <canvas id="c"></canvas>
+  <div id="hud">HP 100/100 &nbsp; Gold 250 &nbsp; Area: Hollow Deep</div>
+  <div id="modeTag"></div>
+  <div class="bar" id="barTop"></div>
+  <div class="bar" id="barBottom"></div>
+
+  <div id="menu">
+    <h2>Pause Menu</h2>
+    <button>Resume</button>
+    <button>Inventory</button>
+    <button>Map</button>
+    <button>Settings</button>
+    <button>Quit to Title</button>
+  </div>
+
+  <div id="dialogue"></div>
+</div>
+
+<script>
+/*
+ * Reproduces the STATISTICAL PROPERTIES of each genre mode for the Phase 0b
+ * cluster-stability experiment. It is not a game and is not pretending to be --
+ * what matters for clustering is how much of the frame changes, how often, and
+ * whether any region stays fixed.
+ *
+ *   menu      static UI, nothing moves            -> must cluster to ~1
+ *   dialogue  static frame, text changes slowly   -> few clusters
+ *   cutscene  full-frame motion + letterbox bars  -> the hard case for "global"
+ *   world     continuously moving viewport with a FIXED HUD
+ *             -> the case that decides whether the tile-volatility mask works
+ */
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const hud = document.getElementById("hud");
+const menu = document.getElementById("menu");
+const dlg = document.getElementById("dialogue");
+const tag = document.getElementById("modeTag");
+const barTop = document.getElementById("barTop");
+const barBottom = document.getElementById("barBottom");
+
+function fit() { c.width = innerWidth; c.height = innerHeight; }
+addEventListener("resize", fit); fit();
+
+let mode = new URLSearchParams(location.search).get("mode") || "menu";
+let t = 0;
+
+const LINES = [
+  "The wind carries something bitter from the deep.",
+  "You should not have come this far.",
+  "Take the lantern. You will need it.",
+  "Three of us went down. I came back.",
+  "Do you hear that? Neither did they.",
+];
+
+function drawWorld() {
+  const w = c.width, h = c.height;
+  ctx.fillStyle = "#10131a"; ctx.fillRect(0, 0, w, h);
+  // Parallax layers: every pixel of the viewport moves, every frame.
+  for (let layer = 0; layer < 4; layer++) {
+    const speed = 0.4 + layer * 0.55;
+    const yBase = h * (0.45 + layer * 0.12);
+    ctx.fillStyle = ["#1b2130", "#232c3e", "#2d384d", "#38455e"][layer];
+    ctx.beginPath(); ctx.moveTo(0, h);
+    for (let x = 0; x <= w; x += 16) {
+      const y = yBase + Math.sin((x + t * speed * 9) * 0.006 + layer) * 42
+                      + Math.sin((x + t * speed * 4) * 0.017) * 14;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, h); ctx.closePath(); ctx.fill();
+  }
+  // Drifting particles, so even flat regions are never byte-identical.
+  ctx.fillStyle = "rgba(190,210,255,.5)";
+  for (let i = 0; i < 70; i++) {
+    const x = (i * 137 + t * (1.5 + (i % 5))) % w;
+    const y = (i * 91 + t * 0.7) % h;
+    ctx.fillRect(x, y, 2, 2);
+  }
+}
+
+function drawCutscene() {
+  const w = c.width, h = c.height;
+  const g = ctx.createLinearGradient(0, 0, w, h);
+  const p = (t % 240) / 240;
+  g.addColorStop(0, `hsl(${(p * 360) | 0}, 45%, 12%)`);
+  g.addColorStop(1, `hsl(${((p * 360) + 120) % 360 | 0}, 50%, 26%)`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate(t * 0.012);
+  ctx.fillStyle = "rgba(255,255,255,.10)";
+  for (let i = 0; i < 9; i++) {
+    ctx.rotate(Math.PI * 2 / 9);
+    ctx.fillRect(90 + Math.sin(t * 0.03) * 40, -9, 190, 18);
+  }
+  ctx.restore();
+}
+
+function setMode(m) {
+  mode = m;
+  menu.style.display = m === "menu" ? "flex" : "none";
+  dlg.style.display = m === "dialogue" ? "block" : "none";
+  barTop.style.display = barBottom.style.display = m === "cutscene" ? "block" : "none";
+  hud.style.display = (m === "world" || m === "dialogue") ? "block" : "none";
+  tag.textContent = "mode: " + m;
+}
+
+function frame() {
+  t++;
+  const w = c.width, h = c.height;
+  if (mode === "world") drawWorld();
+  else if (mode === "cutscene") drawCutscene();
+  else { ctx.fillStyle = "#0d0d10"; ctx.fillRect(0, 0, w, h); }
+
+  if (mode === "world") {
+    // A HUD that is genuinely static is the whole point of this mode: it is the
+    // signal the tile-volatility mask has to find underneath a churning viewport.
+    hud.textContent = "HP 100/100   Gold 250   Area: Hollow Deep";
+  }
+  if (mode === "dialogue" && t % 180 === 0) {
+    dlg.textContent = LINES[(t / 180) % LINES.length | 0];
+  }
+  requestAnimationFrame(frame);
+}
+
+setMode(mode);
+if (mode === "dialogue") dlg.textContent = LINES[0];
+frame();
+window.__SET_MODE__ = setMode;
+</script>

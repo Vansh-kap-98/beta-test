@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>KEYTEST|ready</title>
+<style>
+  body { font-family: ui-monospace, Consolas, monospace; background:#111; color:#0f0;
+         margin:0; padding:18px; font-size:13px; }
+  #log { white-space: pre-wrap; line-height:1.45; }
+  h3 { color:#8f8; margin:0 0 10px; font-size:14px; }
+</style>
+<h3>Input probe &mdash; echoes received events into the window title</h3>
+<div style="color:#6a6;margin-bottom:8px" id="dpr"></div>
+<script>document.getElementById("dpr").textContent =
+  "devicePixelRatio " + (window.devicePixelRatio || 1);</script>
+<div id="log">waiting...</div>
+
+<script>
+/*
+ * Closed-loop verification for synthetic input.
+ *
+ * The bot injects input with SendInput and then reads THIS PAGE'S WINDOW TITLE back
+ * through GetWindowTextW. The two paths share nothing, so a pass means a real key
+ * event reached a real application -- not merely that SendInput returned success,
+ * which it does even when the target ignores the event completely.
+ *
+ * `code` is the physical key position (KeyW, ArrowLeft), which is what a scancode
+ * injection should produce. If injection were going through virtual-key codes on a
+ * non-US layout, `code` and `key` would disagree and that shows up here.
+ */
+const events = [];
+const logEl = document.getElementById("log");
+
+function record(kind, detail) {
+  events.push(kind + ":" + detail);
+  if (events.length > 40) events.shift();
+  // The title is the channel the bot reads. Keep it short and parseable.
+  document.title = "KEYTEST|" + events.slice(-8).join(",");
+  logEl.textContent = events.slice(-24).join("\n");
+}
+
+addEventListener("keydown", (e) => {
+  if (e.repeat) return;
+  record("down", e.code + "/" + (e.key.length === 1 ? e.key : e.key));
+  e.preventDefault();
+});
+addEventListener("keyup", (e) => {
+  record("up", e.code);
+  e.preventDefault();
+});
+addEventListener("mousedown", (e) => {
+  // Report PHYSICAL pixels, not CSS pixels. At 125% display scaling these differ by
+  // 1.25x, and comparing the two makes a correctly-aimed click look 25% off target.
+  // The bot works in physical pixels throughout (that is what screen capture gives),
+  // so this is the number that should match what it aimed at.
+  const dpr = window.devicePixelRatio || 1;
+  record("mdown", e.button + "@" + Math.round(e.clientX * dpr) + "," + Math.round(e.clientY * dpr));
+});
+addEventListener("mouseup", (e) => record("mup", e.button));
+addEventListener("wheel", (e) => record("wheel", Math.sign(e.deltaY)), { passive: true });
+
+window.__RESET__ = () => {
+  events.length = 0;
+  document.title = "KEYTEST|ready";
+  logEl.textContent = "reset";
+};
+</script>

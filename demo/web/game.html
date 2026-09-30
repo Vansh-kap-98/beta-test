@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Web Game Harness</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; max-width: 520px; }
+  .screen { display: none; }
+  .screen.active { display: block; }
+  button { display: block; margin: 8px 0; padding: 8px 14px; font-size: 15px; }
+  #hud { color: #555; margin-bottom: 12px; }
+  .narrow { width: 120px; overflow: hidden; white-space: nowrap; text-overflow: clip; }
+</style>
+
+<div id="hud"></div>
+
+<div id="home" class="screen active">
+  <button data-testid="play">Play</button>
+  <button data-testid="shop">Shop</button>
+  <button data-testid="settings">Settings</button>
+</div>
+
+<div id="shop" class="screen">
+  <button data-testid="buy-potion">Buy Potion (10g)</button>
+  <button data-testid="buy-elixir" class="narrow">Elixir of Absolutely Everything Forever (80g)</button>
+  <button data-testid="shop-back">Back</button>
+</div>
+
+<div id="settings" class="screen">
+  <button data-testid="toggle-sound">Toggle Sound</button>
+  <!-- PLANTED BUG: no way out of settings -->
+</div>
+
+<div id="play" class="screen">
+  <button data-testid="attack">Attack</button>
+  <button data-testid="play-back">Back</button>
+</div>
+
+<script>
+  const state = { gold: 50, potions: 0, screen: "home" };
+  const errors = [];
+  window.addEventListener("error", (e) => errors.push("UNCAUGHT: " + e.message));
+
+  function show(id) {
+    document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
+    document.getElementById(id).classList.add("active");
+    state.screen = id;
+    render();
+  }
+  function render() {
+    document.getElementById("hud").textContent =
+      "Gold: " + state.gold + "  |  Potions: " + state.potions + "  |  Screen: " + state.screen;
+  }
+  const on = (id, fn) => document.querySelector('[data-testid="' + id + '"]').addEventListener("click", fn);
+
+  on("play", () => show("play"));
+  on("shop", () => show("shop"));
+  on("settings", () => show("settings"));
+  on("shop-back", () => show("home"));
+  on("play-back", () => show("home"));
+  on("toggle-sound", () => {});
+  on("attack", () => { state.gold += 5; render(); });
+  // PLANTED BUG: buying grants the item without deducting gold
+  on("buy-potion", () => { state.potions += 1; render(); });
+  on("buy-elixir", () => { state.potions += 1; render(); });
+
+  window.__GAME__ = {
+    state,
+    screen: () => state.screen,
+    vars: () => ({ gold: state.gold, potions: state.potions }),
+    drainErrors: () => errors.splice(0),
+    reset: () => { state.gold = 50; state.potions = 0; show("home"); },
+  };
+  render();
+</script>
+
+<hr style="margin:24px 0">
+<button id="runbot" style="background:#111;color:#fff;border:0;border-radius:6px">Run the bot</button>
+<pre id="out" style="white-space:pre-wrap;font-size:13px;line-height:1.5;background:#f6f6f6;padding:12px;border-radius:6px;margin-top:12px"></pre>
+
+<script type="module">
+  // The whole agent, compiled from the same sources the Node test suite runs.
+  import { runBot } from "./bot.js";
+
+  const out = document.getElementById("out");
+  document.getElementById("runbot").addEventListener("click", async () => {
+    out.textContent = "running...";
+    const { result, stats } = await runBot({ steps: 400, seed: 1 });
+    const lines = [];
+    lines.push(result.steps + " steps, " + result.coverage + " distinct states, screens: " + result.screensVisited.join(", "));
+    const absorption = stats.decisions ? ((stats.absorbed / stats.decisions) * 100).toFixed(1) : "n/a";
+    lines.push("tier-1 absorption " + absorption + "%, " + stats.plannerCalls + " tier-2 calls, " + stats.socQuestions + " questions in " + stats.socCalls + " calls");
+    lines.push("");
+    if (result.findings.length === 0) lines.push("no defects found");
+    for (const d of result.results) {
+      lines.push("[" + d.finding.severity + "/" + d.finding.bugClass + "/" + d.finding.source + "] " + d.finding.title);
+      lines.push("    " + d.finding.detail.slice(0, 220));
+      lines.push("    repro: seed " + d.finding.replay.seed + ", " + d.finding.replay.actions.length + " actions");
+    }
+    out.textContent = lines.join(String.fromCharCode(10));
+    window.__LAST__ = { result, stats };
+  });
+</script>
