@@ -1,0 +1,286 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sugar Cascade</title>
+<style>
+  :root { --cell: 52px; }
+  html,body { margin:0; background:#241833; color:#fff;
+              font-family: system-ui, sans-serif; overflow:hidden; }
+  #wrap { position:relative; width:100vw; height:100vh; }
+  #hud { padding:10px 16px; display:flex; gap:26px; font-size:16px;
+         font-variant-numeric: tabular-nums; }
+  #hud b { color:#ffd85e; }
+  #board { position:absolute; left:16px; top:56px;
+           display:grid; grid-template-columns: repeat(8, var(--cell));
+           grid-auto-rows: var(--cell); gap:3px; }
+  .cell { width:var(--cell); height:var(--cell); border-radius:9px;
+          display:flex; align-items:center; justify-content:center;
+          font-size:26px; cursor:pointer; user-select:none;
+          transition: transform .08s; }
+  .cell.sel { outline:3px solid #fff; transform:scale(.9); }
+  .overlay { position:absolute; inset:0; background:rgba(12,6,22,.86);
+             display:none; flex-direction:column; align-items:center;
+             justify-content:center; gap:16px; z-index:20; text-align:center; }
+  .overlay.show { display:flex; }
+  .panel { background:#3b2a52; padding:26px 34px; border-radius:14px;
+           min-width:300px; box-shadow:0 10px 40px #0008; }
+  button { font-size:16px; padding:10px 20px; border:0; border-radius:9px;
+           background:#ffd85e; color:#3a2410; font-weight:600; cursor:pointer; }
+  button.ghost { background:#5b4580; color:#fff; }
+  h2 { margin:0 0 10px; }
+  #toast { position:absolute; right:16px; top:56px; background:#000a;
+           padding:10px 14px; border-radius:8px; font-size:14px; display:none; }
+</style>
+
+<div id="wrap">
+  <div id="hud">
+    <span>Score <b id="score">0</b></span>
+    <span>Moves <b id="moves">20</b></span>
+    <span>Goal <b id="goal">1000</b></span>
+    <span>Level <b id="level">1</b></span>
+  </div>
+  <div id="board"></div>
+  <div id="toast"></div>
+
+  <div class="overlay" id="ovTutorial">
+    <div class="panel">
+      <h2>Welcome!</h2>
+      <p id="tutText">Swap two candies to make a line of three.</p>
+      <button data-testid="tut-ok">Got it</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="ovWin">
+    <div class="panel">
+      <h2>Level Complete!</h2>
+      <p id="winText">Nice work.</p>
+      <button data-testid="next-level">Next Level</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="ovLose">
+    <div class="panel">
+      <h2>Out of Moves</h2>
+      <p>You ran out of moves.</p>
+      <button data-testid="buy-moves">Get 5 More Moves</button>
+      <div style="height:10px"></div>
+      <button class="ghost" id="retryBtn" data-testid="retry">Retry Level</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="ovStuck">
+    <div class="panel">
+      <h2>No More Matches</h2>
+      <p>There are no valid moves left.</p>
+      <button data-testid="shuffle" id="shuffleBtn">Shuffle Board</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/*
+ * Sugar Cascade -- a match-3 fixture standing in for Candy Crush.
+ *
+ * Built to have the properties that matter for testing a match-3, not to be fun:
+ * a discrete grid, cascading resolutions with animation, a move economy, win/lose
+ * flows, a tutorial, and modal popups. Planted defects are toggled by query string
+ * so every detector can be measured against a build whose bugs are known.
+ *
+ *   ?bug=scoreCascade    cascades award no score        (flow)
+ *   ?bug=tutorialVague   tutorial never states the goal (UX / comprehension)
+ *   ?bug=stuckNoShuffle  shuffle button does nothing    (softlock)
+ *   ?bug=ghostMove       a move is consumed on an invalid swap (flow)
+ *   ?bug=winNoAdvance    "Next Level" does not advance  (softlock)
+ *   ?bug=all
+ */
+const W = 8, H = 8;
+const KINDS = ["🍬","🍭","🍓","🍋","🫐","🍏"];
+const params = new URLSearchParams(location.search);
+const bugArg = params.get("bug") || "";
+const BUGS = new Set(bugArg === "all"
+  ? ["scoreCascade","tutorialVague","stuckNoShuffle","ghostMove","winNoAdvance"]
+  : bugArg.split(",").filter(Boolean));
+
+// Seeded RNG so a run is reproducible given the same seed -- the one determinism
+// a real commercial game will not give us, kept here because the fixture can.
+let seed = parseInt(params.get("seed") || "1", 10) >>> 0;
+function rnd() {
+  seed = (seed + 0x6d2b79f5) >>> 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+
+const boardEl = document.getElementById("board");
+let grid = [], score = 0, moves = 20, goal = 1000, level = 1, sel = null, busy = false;
+
+function idx(x, y) { return y * W + x; }
+function at(x, y) { return (x < 0 || y < 0 || x >= W || y >= H) ? null : grid[idx(x, y)]; }
+
+function fill() {
+  grid = new Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let k;
+    do { k = Math.floor(rnd() * KINDS.length); }
+    while ((x >= 2 && grid[idx(x-1,y)] === k && grid[idx(x-2,y)] === k) ||
+           (y >= 2 && grid[idx(x,y-1)] === k && grid[idx(x,y-2)] === k));
+    grid[idx(x, y)] = k;
+  }
+}
+
+function findMatches() {
+  const hit = new Set();
+  for (let y = 0; y < H; y++) for (let x = 0; x < W - 2; x++) {
+    const k = at(x,y); if (k === null) continue;
+    if (at(x+1,y) === k && at(x+2,y) === k) { hit.add(idx(x,y)); hit.add(idx(x+1,y)); hit.add(idx(x+2,y));
+      let n = x+3; while (at(n,y) === k) { hit.add(idx(n,y)); n++; } }
+  }
+  for (let x = 0; x < W; x++) for (let y = 0; y < H - 2; y++) {
+    const k = at(x,y); if (k === null) continue;
+    if (at(x,y+1) === k && at(x,y+2) === k) { hit.add(idx(x,y)); hit.add(idx(x,y+1)); hit.add(idx(x,y+2));
+      let n = y+3; while (at(x,n) === k) { hit.add(idx(x,n)); n++; } }
+  }
+  return hit;
+}
+
+function anyValidMove() {
+  const swapTest = (a, b) => {
+    const t = grid[a]; grid[a] = grid[b]; grid[b] = t;
+    const ok = findMatches().size > 0;
+    const u = grid[a]; grid[a] = grid[b]; grid[b] = u;
+    return ok;
+  };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (x < W-1 && swapTest(idx(x,y), idx(x+1,y))) return true;
+    if (y < H-1 && swapTest(idx(x,y), idx(x,y+1))) return true;
+  }
+  return false;
+}
+
+async function resolve(isCascade) {
+  let chain = 0;
+  for (;;) {
+    const hit = findMatches();
+    if (!hit.size) break;
+    chain++;
+    // PLANTED BUG: cascades award nothing, so the score silently under-counts.
+    const award = (chain > 1 && BUGS.has("scoreCascade")) ? 0 : hit.size * 20 * chain;
+    score += award;
+    hit.forEach(i => grid[i] = null);
+    render();
+    await sleep(160);
+    // gravity
+    for (let x = 0; x < W; x++) {
+      let write = H - 1;
+      for (let y = H - 1; y >= 0; y--) {
+        if (grid[idx(x,y)] !== null) { grid[idx(x,write)] = grid[idx(x,y)]; if (write !== y) grid[idx(x,y)] = null; write--; }
+      }
+      for (let y = write; y >= 0; y--) grid[idx(x,y)] = Math.floor(rnd() * KINDS.length);
+    }
+    render();
+    await sleep(140);
+  }
+  return chain;
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function render() {
+  boardEl.innerHTML = "";
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const d = document.createElement("div");
+    d.className = "cell" + (sel && sel.x === x && sel.y === y ? " sel" : "");
+    d.dataset.testid = "cell-" + x + "-" + y;
+    const k = grid[idx(x,y)];
+    d.textContent = k === null ? "" : KINDS[k];
+    d.style.background = k === null ? "transparent" : ["#ff6b9d","#c77dff","#ff9770","#ffd670","#70a1ff","#8ce99a"][k];
+    d.onclick = () => tap(x, y);
+    boardEl.appendChild(d);
+  }
+  document.getElementById("score").textContent = score;
+  document.getElementById("moves").textContent = moves;
+  document.getElementById("goal").textContent = goal;
+  document.getElementById("level").textContent = level;
+}
+
+function show(id) { document.getElementById(id).classList.add("show"); }
+function hide(id) { document.getElementById(id).classList.remove("show"); }
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 1100);
+}
+
+async function tap(x, y) {
+  if (busy) return;
+  if (!sel) { sel = { x, y }; render(); return; }
+  const dx = Math.abs(sel.x - x), dy = Math.abs(sel.y - y);
+  if (dx + dy !== 1) { sel = { x, y }; render(); return; }
+
+  busy = true;
+  const a = idx(sel.x, sel.y), b = idx(x, y);
+  const t = grid[a]; grid[a] = grid[b]; grid[b] = t;
+  sel = null;
+
+  if (!findMatches().size) {
+    // Invalid swap: revert. PLANTED BUG: a move is consumed anyway.
+    const u = grid[a]; grid[a] = grid[b]; grid[b] = u;
+    if (BUGS.has("ghostMove")) moves--;
+    render(); toast("No match there");
+    busy = false;
+    checkEnd();
+    return;
+  }
+
+  moves--;
+  await resolve(false);
+  render();
+  busy = false;
+  checkEnd();
+}
+
+function checkEnd() {
+  if (score >= goal) { show("ovWin"); return; }
+  if (moves <= 0) { show("ovLose"); return; }
+  if (!anyValidMove()) show("ovStuck");
+}
+
+function newLevel(n) {
+  level = n; score = 0; moves = 20 + n * 2; goal = 1000 + (n - 1) * 400;
+  fill(); sel = null; render();
+  hide("ovWin"); hide("ovLose"); hide("ovStuck");
+}
+
+document.querySelector('[data-testid="tut-ok"]').onclick = () => hide("ovTutorial");
+document.querySelector('[data-testid="next-level"]').onclick = () => {
+  // PLANTED BUG: the button does nothing, trapping the player on the win screen.
+  if (BUGS.has("winNoAdvance")) { toast("..."); return; }
+  newLevel(level + 1);
+};
+document.querySelector('[data-testid="buy-moves"]').onclick = () => {
+  moves += 5; hide("ovLose"); render();
+};
+document.getElementById("retryBtn").onclick = () => newLevel(level);
+document.getElementById("shuffleBtn").onclick = () => {
+  // PLANTED BUG: shuffle does nothing, so a dead board is a hard softlock.
+  if (BUGS.has("stuckNoShuffle")) { toast("..."); return; }
+  fill(); hide("ovStuck"); render();
+};
+
+// PLANTED BUG (comprehension): the tutorial never states the actual objective.
+if (BUGS.has("tutorialVague")) {
+  document.getElementById("tutText").textContent = "Tap things to play.";
+}
+
+newLevel(1);
+show("ovTutorial");
+
+// Debug hook, mirroring what a studio would expose for a white-box adapter.
+window.__GAME__ = {
+  state: () => ({ score, moves, goal, level, busy,
+                  overlay: ["ovTutorial","ovWin","ovLose","ovStuck"]
+                    .find(id => document.getElementById(id).classList.contains("show")) || null }),
+  grid: () => grid.slice(),
+  validMoveExists: () => anyValidMove(),
+  reset: (s) => { seed = (s || 1) >>> 0; newLevel(1); show("ovTutorial"); },
+};
+</script>
