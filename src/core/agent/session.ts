@@ -17,6 +17,17 @@ export interface Policy {
   onResult?(before: GameState, action: Action, after: GameState): void | Promise<void>;
   /** Told the seed at session start, so a policy can stamp its own findings. */
   onReset?(seed: number): void;
+  /**
+   * The very first observation, before any action has been taken.
+   *
+   * Without this the opening screen is never judged. The invariant suite runs from
+   * `onResult`, which only ever sees post-action states, so the title screen and
+   * the tutorial -- the two screens every player meets first and the richest source
+   * of comprehension findings -- were evaluated zero times. On the fixture the
+   * planted vague-tutorial bug was consequently unfindable: the bot dismissed the
+   * tutorial with its first action and the suite's first look came afterwards.
+   */
+  onStart?(state: GameState): void | Promise<void>;
   /** Findings the policy itself produced since the last call. */
   drain?(): Finding[];
 }
@@ -40,9 +51,30 @@ export interface SessionOptions {
   rewindSteps?: number;
   /** Give up recovering after this many rewinds. */
   maxRecoveries?: number;
+  /**
+   * Checked each step; a non-null return ends the run early with that reason.
+   *
+   * Exists for the live adapter, whose target can stop being safe to touch midway
+   * through a run -- the window minimised, closed, or pushed behind something else.
+   * Continuing then is worse than stopping twice over: synthetic input goes to
+   * whichever window has focus, so the clicks land in the user's own applications,
+   * and captures of a hidden window return stale pixels so the agent reports
+   * confident softlocks for screens it never actually saw.
+   *
+   * Returning a reason rather than throwing is deliberate: the findings gathered
+   * before the target was lost are real and are kept, and the report says plainly
+   * where the run stopped and why.
+   */
+  shouldStop?: () => string | null;
 }
 
 export interface SessionResult {
+  /**
+   * Why the run ended before using its step budget, if it did. A report that covers
+   * fewer screens than intended must say so, or it reads as a clean bill of health
+   * for content that was never reached.
+   */
+  stoppedEarly?: string;
   seed: number;
   policy: string;
   steps: number;
@@ -134,8 +166,16 @@ export async function runSession(
   runner.step(cur, null, actionLog);
   screens.add(cur.screen);
   history.push({ hash: stateHash(cur), screen: cur.screen, action: null });
+  await policy.onStart?.(cur);
+
+  let stoppedEarly: string | null = null;
 
   for (let i = 0; i < opts.steps; i++) {
+    const stop = opts.shouldStop?.() ?? null;
+    if (stop) {
+      stoppedEarly = stop;
+      break;
+    }
     // Never take a restore point inside a known trap, or while something is in
     // flight. Otherwise the checkpoint ring fills with trapped states and every
     // later rewind lands straight back in the trap - which is why recovery fired
@@ -165,7 +205,7 @@ export async function runSession(
 
     const action = await policy.next(cur, choices);
     const before = cur;
-    adapter.act(action);
+    await adapter.act(action);
     actionLog.push(action);
     cur = adapter.observe();
     if (opts.keepStates) states.push(cur);
@@ -251,6 +291,7 @@ export async function runSession(
     screensVisited: [...screens].sort(),
     recoveries,
   };
+  if (stoppedEarly) result.stoppedEarly = stoppedEarly;
   if (opts.keepStates) result.states = states;
   return result;
 }
@@ -277,7 +318,7 @@ export async function replaySession(
   screens.add(cur.screen);
 
   for (const action of actions) {
-    adapter.act(action);
+    await adapter.act(action);
     log.push(action);
     cur = adapter.observe();
     screens.add(cur.screen);

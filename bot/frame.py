@@ -108,6 +108,18 @@ class FrameSource:
         except Exception:
             pass
 
+    def grab_bgr(self) -> np.ndarray:
+        """Capture in colour.
+
+        The luma path is enough for hashing and clustering, but some targets carry
+        their state in HUE rather than brightness -- a match-3 board is exactly that:
+        six candy types that are near-identical in luma and trivially separable in
+        colour. Reading that board in greyscale would lose the entire game state.
+        """
+        raw = self._sct.grab(self.region)
+        arr = np.frombuffer(raw.bgra, dtype=np.uint8).reshape(raw.height, raw.width, 4)
+        return arr[..., :3].copy()
+
     def grab_gray(self) -> np.ndarray:
         """Capture and return a 2D uint8 luma array."""
         raw = self._sct.grab(self.region)

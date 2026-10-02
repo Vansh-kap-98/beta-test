@@ -43,6 +43,15 @@ export interface GameState {
   /** Typed game variables: gold, hp, level, ... */
   vars: Record<string, number | string | boolean>;
   loading: boolean;
+  /**
+   * Text the player can READ that is not itself a control: headings, tutorial copy,
+   * dialogue, "out of moves". Separate from `UiElement.text` because the question
+   * "would a first-time player know what to do" is answered by prose on the screen,
+   * and a screen whose only text is button captions is exactly the screen that
+   * fails it. Adapters that cannot read free text leave this undefined rather than
+   * empty, so "no text" and "could not read the text" stay distinguishable.
+   */
+  text?: string[];
   /** Errors observed since the previous observe() call. Drained by the adapter. */
   errors: string[];
   perf: { fps: number; heapMB: number };
@@ -103,7 +112,14 @@ export interface GameAdapter {
   readonly canSnapshot?: boolean;
   reset(seed: number): void;
   observe(): GameState;
-  act(action: Action): void;
+  /**
+   * Perform an action.
+   *
+   * May return a promise: a live target has to send real input and then wait for the
+   * screen to stop animating, which is inherently asynchronous. In-process fixtures
+   * return void and awaiting them costs nothing.
+   */
+  act(action: Action): void | Promise<void>;
   /** Legal actions from the current state. Used for shortlisting and for fuzzing. */
   availableActions(): Action[];
   snapshot(): unknown;

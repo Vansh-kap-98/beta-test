@@ -91,8 +91,23 @@ export function renderReport(input: ReportInput, replayPaths?: Map<string, strin
   L.push("Screens reached: " + session.screensVisited.map((s) => "`" + s + "`").join(", "));
   L.push("");
 
+  // Stated before the findings, not in a footnote.
+  //
+  // A run that was cut short covers less of the game than it was asked to, and the
+  // most dangerous way to present that is as an ordinary result: "no defects found"
+  // on a report whose run stopped after twelve steps reads as a clean bill of health
+  // for content nobody ever reached.
+  if (session.stoppedEarly) {
+    L.push("> **This run stopped early: " + session.stoppedEarly + ".**");
+    L.push("> It completed " + session.steps + " of its intended steps, so the game is");
+    L.push("> covered less thoroughly than a full run and absence of a finding below");
+    L.push("> is not evidence that the defect is absent.");
+    L.push("");
+  }
+
   if (session.findings.length === 0) {
-    L.push("## No defects found");
+    L.push(session.stoppedEarly ? "## No defects found before the run stopped"
+                                : "## No defects found");
     L.push("");
     L.push(
       "The run completed with every oracle silent. Note what this does and does not mean: " +

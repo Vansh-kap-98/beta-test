@@ -314,6 +314,19 @@ export class Tier1Policy implements Policy {
     return best[Math.floor(this.rand() * best.length)] ?? options[0]!;
   }
 
+  /**
+   * Judge the opening screen, which no action has produced.
+   *
+   * Reuses the ordinary check path with no previous state and no last action, so an
+   * invariant gated on `lastAction` correctly declines while one about the screen
+   * itself -- an exit existing, the instructions making sense -- gets its look.
+   */
+  async onStart(state: GameState): Promise<void> {
+    this.recentScreens.push(state.screen);
+    const soc = serialize(state, undefined, null, this.recentScreens);
+    await this.runInvariants(soc, state.step);
+  }
+
   async onResult(before: GameState, action: Action, after: GameState): Promise<void> {
     this.step += 1;
     this.balance.observe(before, action, after);
@@ -322,10 +335,17 @@ export class Tier1Policy implements Policy {
     if (this.recentScreens.length > 12) this.recentScreens.shift();
 
     const soc = serialize(after, before, action, this.recentScreens);
+    await this.runInvariants(soc, after.step);
 
+    await this.sampleDifficulty(soc, after);
+    this.prevState = before;
+  }
+
+  /** The invariant suite plus its escalation path, shared by onStart and onResult. */
+  private async runInvariants(soc: SocState, step: number): Promise<void> {
     // One call for the whole invariant suite.
     const res = await this.checker.check(soc, {
-      step: after.step,
+      step,
       seed: this.seed,
       actionLog: this.actionLog,
     });
@@ -384,9 +404,6 @@ export class Tier1Policy implements Policy {
         }),
       );
     }
-
-    await this.sampleDifficulty(soc, after);
-    this.prevState = before;
   }
 
   /**

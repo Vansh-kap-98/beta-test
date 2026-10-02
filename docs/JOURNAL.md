@@ -324,3 +324,48 @@ run completes, the report is clean, and the bug is simply never exercised.
 Second, the `canSnapshot` guard added an hour earlier fired correctly on its first
 real target: a live page cannot be snapshotted, so the session disabled recovery
 instead of faking a rewind.
+
+
+## Real model in the loop (Phase 4)
+
+Replaced `MockSystemOne` with real Laya 0.3.23 on the GPU and pointed the whole tier
+stack at a new headless match-3 fixture. Result: **5/5 planted bugs found, clean build
+silent, tier-1 absorption 97-100%**. Full write-up in `PHASE4-MODEL.md`.
+
+The headline is not the score, it is how much had to be wrong first. Two findings
+account for almost all of it:
+
+- **The model cannot read JSON.** Same model, same questions, same facts: JSON state
+  scored 0.652 accuracy and missed 6 of 8 bugs; prose scored 0.957 and missed 1. One
+  question came back at exactly p=0.500 with the answer sitting in the blob as
+  `producedChange: true`. Prose is also faster, being fewer tokens.
+- **Choice confidence was on the wrong scale.** `probabilities[chosen]` depends on the
+  option count, so on a 12-option screen a confident pick scores ~0.25 and a 0.75 gate
+  is unreachable. The first real run absorbed **0%** of decisions. Switching to
+  `top/(top+second)` -- scale-free, and commensurable with a noul's `max(p,1-p)` --
+  took absorption to 97%.
+
+Both were invisible while the mock answered from ground truth instead of reading state.
+That is the lesson about the mock: it validates a pipeline and tells you nothing about
+whether a model can do the job.
+
+Three smaller things worth keeping:
+
+- Defect-positive phrasing matters (6 of 8 missed -> 1 of 8), and such a question must
+  ASK rather than assert its premise, or a yes-biased model just agrees with it.
+- The `applies` predicate is the denominator. A real bug firing 15 times in 237
+  opportunities is a 6% violation rate that the Wilson gate correctly refuses to
+  report. Narrowing the gate, not loosening the threshold, is the fix.
+- Arithmetic belongs in Tier 0. The file said so already; I wrote three invariants that
+  asked the model to compare two numbers and each produced a false positive on a clean
+  build with the answer in the prose in front of it.
+
+The agent also turned out not to be playing the game at all: `match3BestControl`
+matched `shuffle` before anything else, and `shuffle_board` is on every board screen,
+so it pressed Shuffle 200 times a run and never swapped a candy. Absorption stayed at
+90%, the clean build stayed silent, and one bug was still "detected" -- because the bot
+was stuck on the inert control. Nothing in the output looked wrong.
+
+Pointing the real model at the system also found a missing Pause control in our own
+fixture: asked whether the player could leave the board, it said no on every variant
+including clean, and it was right.

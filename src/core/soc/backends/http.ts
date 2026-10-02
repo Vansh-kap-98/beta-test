@@ -1,3 +1,5 @@
+import { renderProse } from "../prose.ts";
+import type { SocState } from "../serialize.ts";
 import type {
   Answer,
   ChoiceQuestion,
@@ -46,6 +48,29 @@ export interface HttpSocOptions {
   retries?: number;
   name?: string;
   fetchImpl?: typeof fetch;
+  /**
+   * How the state blob is rendered for the model. Defaults to prose, and that
+   * default is load-bearing rather than tidy.
+   *
+   * Measured against real Laya on the labelled bench, holding the model and the
+   * questions fixed and changing only this: JSON state scored 0.652 accuracy and
+   * missed 6 of 8 planted bugs; prose state scored 0.957 and missed 1. Handed a
+   * dict, the model answered one question at exactly p=0.500 while the answer sat
+   * in the blob as `producedChange: true` -- it reads language, and JSON is not
+   * language.
+   *
+   * Pass `(s) => s` to send the raw object, which is worth doing only to reproduce
+   * that measurement.
+   */
+  renderState?: (state: unknown) => unknown;
+}
+
+/** Does this look like our state blob, as opposed to a caller's own string? */
+function isSocState(x: unknown): x is SocState {
+  return (
+    typeof x === "object" && x !== null &&
+    "screen" in x && "controls" in x && "lastAction" in x
+  );
 }
 
 interface WireNoulAnswer {
@@ -72,6 +97,43 @@ interface WireResponse {
   answers: Record<string, WireAnswer>;
   usage?: { input_tokens?: number; output_tokens?: number };
   routing?: { model?: string; reason?: string };
+}
+
+/**
+ * Confidence in a choice, restricted to the top two candidates.
+ *
+ * The obvious measure -- `probabilities[chosen]` -- is not comparable across
+ * questions, because probability mass spreads over however many options were
+ * offered. On a twelve-option board screen a confident pick still scores around
+ * 0.25, so a single escalation gate shared with yes/no questions is unreachable by
+ * construction. The first real-model run absorbed 0% of its decisions for exactly
+ * this reason: the gate was 0.75 and Laya's chosen-option probability sat below it
+ * on essentially every step, which destroys the cost argument the design rests on.
+ *
+ * `top / (top + second)` asks the question that actually matters -- am I sure it is
+ * this option rather than the runner-up -- and is independent of the option count.
+ * It also puts choice confidence on the SAME scale as a noul's `max(p, 1-p)`, so one
+ * threshold can honestly govern both.
+ *
+ * Measured over 200 real decisions at ~12 options each, selecting the lowest gate
+ * holding accuracy at or above 0.80:
+ *
+ *   measure                     gate   absorbed   accuracy
+ *   -------------------------   ----   --------   --------
+ *   probabilities[chosen]       0.25     30.5%      0.885
+ *   top / (top + second)        0.55     63.5%      0.819
+ *   lift over chance (top x n)  3.00     29.5%      0.881
+ *
+ * The full distribution is still carried on `dist`, so nothing is lost.
+ */
+function twoWay(w: WireChoiceAnswer): number {
+  const probs = w.probabilities;
+  if (!probs) return w.confidence ?? 0.5;
+  const sorted = Object.values(probs).sort((a, b) => b - a);
+  const top = sorted[0] ?? 0;
+  const second = sorted[1] ?? 0;
+  if (top + second <= 0) return w.confidence ?? 0.5;
+  return top / (top + second);
 }
 
 function toWireQuestion(q: Question): Record<string, unknown> {
@@ -110,6 +172,7 @@ export class HttpSystemOne implements SystemOneClient {
   private timeoutMs: number;
   private retries: number;
   private doFetch: typeof fetch;
+  private renderState: (state: unknown) => unknown;
 
   constructor(opts: HttpSocOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
@@ -119,6 +182,8 @@ export class HttpSystemOne implements SystemOneClient {
     this.retries = opts.retries ?? 2;
     this.doFetch = opts.fetchImpl ?? fetch;
     this.name = opts.name ?? "http";
+    this.renderState =
+      opts.renderState ?? ((st) => (isSocState(st) ? renderProse(st) : st));
   }
 
   async ask(state: unknown, questions: Question[]): Promise<Answer[]> {
@@ -128,7 +193,10 @@ export class HttpSystemOne implements SystemOneClient {
     const wireQuestions: Record<string, unknown> = {};
     for (const q of questions) wireQuestions[q.id] = toWireQuestion(q);
 
-    const body: Record<string, unknown> = { state, questions: wireQuestions };
+    const body: Record<string, unknown> = {
+      state: this.renderState(state),
+      questions: wireQuestions,
+    };
     if (this.model) body["model"] = this.model;
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -199,8 +267,7 @@ export class HttpSystemOne implements SystemOneClient {
         const value = (q as ChoiceQuestion).options.includes(w.choice)
           ? w.choice
           : ((q as ChoiceQuestion).options[0] ?? w.choice);
-        const p = w.probabilities?.[w.choice] ?? w.confidence ?? 0.5;
-        const answer: Answer = { id: q.id, kind: "choice", value, p };
+        const answer: Answer = { id: q.id, kind: "choice", value, p: twoWay(w) };
         if (w.probabilities) answer.dist = w.probabilities;
         return answer;
       }

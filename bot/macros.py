@@ -120,6 +120,15 @@ class MacroExecutor:
                 if (time.perf_counter() - t0) * 1000.0 > max_ms:
                     aborted = True
                     break
+                # Checked before EVERY step, not only during sleeps.
+                #
+                # A macro can run for seconds -- a hold, a drag, a settle wait -- and
+                # focus can move in the middle of one. Stopping between steps is the
+                # difference between a half-finished click on the game and the rest
+                # of a drag being performed across whatever window just took focus.
+                if abort_when is not None and abort_when():
+                    aborted = True
+                    break
                 steps_run += 1
 
                 if step.kind == "keyTap":

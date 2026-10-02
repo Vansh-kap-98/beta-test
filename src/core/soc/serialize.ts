@@ -36,6 +36,8 @@ export interface SocState {
    * even lived on.
    */
   controls: Array<{ id: string; kind: string; text: string; enabled: boolean }>;
+  /** Readable, non-control text on the screen. Absent if the adapter cannot read it. */
+  text?: string[];
   recentScreens: string[];
   errorCount: number;
 }
@@ -96,6 +98,7 @@ export function serialize(
     controls: cur.elements
       .filter((e) => e.visible && e.kind !== "label")
       .map((e) => ({ id: e.id, kind: e.kind, text: e.text ?? "", enabled: e.enabled })),
+    ...(cur.text ? { text: cur.text } : {}),
     recentScreens: recentScreens.slice(-6),
     errorCount: cur.errors.length,
   };

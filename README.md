@@ -264,3 +264,20 @@ page. Press **Run the bot**. See [demo/README.md](demo/README.md).
 - [docs/JOURNAL.md](docs/JOURNAL.md) — the build log, including the wrong turns,
   which carry more design information than the successes
 - [docs/DECISIONS.md](docs/DECISIONS.md) — decisions taken and why
+
+
+## Real model results
+
+`docs/PHASE4-MODEL.md` -- Laya 0.3.23 running locally on GPU through the same
+`POST /v1/systemone` contract as Jev. Against the headless match-3 fixture:
+**5/5 planted bugs found, clean build silent, tier-1 absorption 97-100%**, 12-26
+Tier-2 calls per 450 steps.
+
+```bash
+LAYA_HOST=127.0.0.1 LAYA_PORT=8231 LAYA_DEVICE=cuda py -3.12 -m laya.serve
+npm run sim -- --backend laya --steps 150 --seeds 3
+```
+
+Two measurements shaped the design more than anything else: the model reads prose and
+not JSON (0.957 vs 0.652 accuracy, 1 vs 6 of 8 bugs missed), and choice confidence has
+to be scale-free (`top/(top+second)`) or absorption collapses to zero.

@@ -14,7 +14,10 @@
     "replay": "node --experimental-strip-types src/cli/replay.ts",
     "calibrate": "node --experimental-strip-types src/cli/calibrate.ts",
     "build:web": "node demo/build-web.mjs",
-    "demo:web": "node demo/serve.mjs"
+    "demo:web": "node demo/serve.mjs",
+    "live": "node --experimental-strip-types src/cli/live.ts",
+    "sim": "node --experimental-strip-types src/cli/sim.ts",
+    "gatebench": "node --experimental-strip-types src/cli/gatebench.ts"
   },
   "devDependencies": {
     "typescript": "^5.8.0",

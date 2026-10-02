@@ -17,8 +17,9 @@ more than the rest of this file:
 
 import ctypes
 import ctypes.wintypes as wt
+import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -147,9 +148,8 @@ def list_windows(min_area: int = 200 * 200) -> List[WindowInfo]:
     return out
 
 
-def find_window(match: str, exact: bool = False) -> Optional[WindowInfo]:
-    """Find a window by title or process name. Largest match wins, on the assumption
-    that a game's main window is bigger than its launcher or splash screen."""
+def find_windows(match: str, exact: bool = False) -> List[WindowInfo]:
+    """All windows matching by title or process name, largest first."""
     m = match.lower()
     cands = []
     for w in list_windows():
@@ -157,9 +157,197 @@ def find_window(match: str, exact: bool = False) -> Optional[WindowInfo]:
         hit = (hay_title == m or hay_proc == m) if exact else (m in hay_title or m in hay_proc)
         if hit:
             cands.append(w)
-    if not cands:
+    return sorted(cands, key=lambda w: w.width * w.height, reverse=True)
+
+
+# Two windows of nearly the same size are not a launcher and a game -- they are two
+# instances, and picking the bigger one is a coin flip.
+AMBIGUOUS_AREA_RATIO = 0.95
+
+
+def ambiguous(cands: Sequence[WindowInfo]) -> bool:
+    """Is the match too close to call?
+
+    "Largest wins" is a good heuristic for a launcher next to a game window, and a
+    silent disaster for two copies of the same game: a run attaches to whichever
+    instance Windows happened to enumerate larger, and a test of build B can measure
+    build A while reporting success. Observed exactly that -- a clean run and a
+    planted-bug run returned byte-identical output because both attached to the same
+    window.
+    """
+    if len(cands) < 2:
+        return False
+    a0 = cands[0].width * cands[0].height
+    a1 = cands[1].width * cands[1].height
+    return a0 > 0 and (a1 / a0) >= AMBIGUOUS_AREA_RATIO
+
+
+def find_window(match: str, exact: bool = False) -> Optional[WindowInfo]:
+    """Find a window by title or process name. Largest match wins, on the assumption
+    that a game's main window is bigger than its launcher or splash screen."""
+    cands = find_windows(match, exact)
+    return cands[0] if cands else None
+
+
+
+def is_window(hwnd: int) -> bool:
+    """Does this window still exist? A closed game leaves a stale handle behind."""
+    return bool(user32.IsWindow(wt.HWND(hwnd)))
+
+
+def is_minimized(hwnd: int) -> bool:
+    return bool(user32.IsIconic(wt.HWND(hwnd)))
+
+
+def foreground_info() -> Optional[WindowInfo]:
+    """Whatever currently has focus, so an error can name what stole it."""
+    h = user32.GetForegroundWindow()
+    if not h:
         return None
-    return max(cands, key=lambda w: w.width * w.height)
+    return _info(h)
+
+
+# A window whose client area changed by more than this many pixels in either
+# dimension has been resized, which invalidates any cached geometry derived from it
+# (a detected board grid, a remembered control box). A couple of pixels of drift is
+# not worth re-detecting for.
+RESIZE_TOLERANCE = 4
+
+
+class TargetGuard:
+    """Is it still safe to send input to the window we attached to?
+
+    This is a safety device, not a correctness one. Synthetic input goes to whichever
+    window has FOCUS, not to the window we captured -- so the moment the target is
+    minimised, closed, or pushed behind something else, every click and keystroke the
+    bot sends lands in whatever the user happens to have in front: their editor, their
+    browser, their files. A test run that does not notice becomes a program typing
+    randomly into someone's desktop.
+
+    It is also a correctness disaster, in a way that hides itself. Captures of a
+    minimised window return stale or blank pixels, so the agent reads an unchanging
+    screen, concludes that nothing it does has any effect, and reports a confident
+    softlock for every screen it "visited". Plausible output, entirely fictional --
+    the same failure mode as the locked-session case, which is why that check already
+    exists next to this one.
+
+    So the check runs before every observation AND immediately before every action,
+    and between the steps of a multi-step macro, because a macro can take seconds and
+    focus can move in the middle of one.
+    """
+
+    def __init__(self, hwnd: int, width: int, height: int, title: str = ""):
+        self.hwnd = hwnd
+        self.width = width
+        self.height = height
+        self.title = title
+        self.last_reason: Optional[str] = None
+        self.last_detail: str = ""
+
+    def check(self) -> Optional[str]:
+        """None when safe, otherwise a short machine-readable reason."""
+        locked = session_locked()
+        if locked:
+            self._set("session_locked", "%s holds the screen" % locked)
+            return "session_locked"
+
+        if not is_window(self.hwnd):
+            self._set("closed", "the window no longer exists; the game was closed")
+            return "closed"
+
+        if is_minimized(self.hwnd):
+            self._set("minimized",
+                      "the target window is minimised, so input would go to whatever "
+                      "is in front of it and captures would be stale")
+            return "minimized"
+
+        if not user32.IsWindowVisible(wt.HWND(self.hwnd)):
+            self._set("hidden", "the target window is no longer visible")
+            return "hidden"
+
+        if not is_foreground(self.hwnd):
+            fg = foreground_info()
+            self._set("not_foreground",
+                      "focus moved to %s" % (("%s [%s]" % (fg.title or "(untitled)", fg.process))
+                                             if fg else "another window"))
+            return "not_foreground"
+
+        r = _client_rect_on_screen(self.hwnd)
+        if r is None:
+            self._set("no_client_rect", "the window reports no client area")
+            return "no_client_rect"
+        if (abs(r[2] - self.width) > RESIZE_TOLERANCE or
+                abs(r[3] - self.height) > RESIZE_TOLERANCE):
+            self._set("resized", "the window was resized from %dx%d to %dx%d; cached "
+                                 "geometry is no longer valid"
+                                 % (self.width, self.height, r[2], r[3]))
+            return "resized"
+
+        self.last_reason = None
+        self.last_detail = ""
+        return None
+
+    def _set(self, reason: str, detail: str) -> None:
+        self.last_reason = reason
+        self.last_detail = detail
+
+    def safe(self) -> bool:
+        return self.check() is None
+
+    def accept_resize(self) -> Optional[WindowInfo]:
+        """Adopt the window's new size after a resize, returning fresh info."""
+        info = _info(self.hwnd)
+        if info is None:
+            return None
+        self.width, self.height = info.width, info.height
+        return info
+
+
+# Processes that own the screen when the session is locked or the secure desktop is
+# up. Nothing can be captured or clicked behind them.
+LOCK_PROCESSES = {"lockapp.exe", "logonui.exe", "consent.exe", "credentialuibroker.exe"}
+
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+ES_DISPLAY_REQUIRED = 0x00000002
+
+
+def keep_awake(enable: bool = True) -> bool:
+    """Ask Windows not to sleep or blank the display during a run.
+
+    Plain user-space SetThreadExecutionState -- the same call a video player makes.
+    It prevents the display sleeping; it does NOT and cannot defeat a lock policy,
+    so `session_locked()` still has to be checked.
+    """
+    flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED if enable else 0)
+    return bool(kernel32.SetThreadExecutionState(ctypes.c_uint(flags)))
+
+
+def session_locked() -> Optional[str]:
+    """Name the process holding the screen if the session is locked, else None.
+
+    Worth checking before every run and periodically during one. A locked session
+    captures as the lock screen and swallows all input, so a bot that does not notice
+    produces a full report of confident nonsense -- every screen "unreadable", every
+    action "no effect", every stagnation detector firing. Silence about this would be
+    the worst kind of failure: plausible output, entirely meaningless.
+    """
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        # NOT a lock. Windows reports no foreground window transiently -- during a
+        # window transition, while the desktop itself has focus, in the moment after
+        # a window is created or minimised. This used to return "unknown", which the
+        # target guard then treated as a locked session and aborted healthy runs on,
+        # including one where the window was perfectly visible and in front.
+        #
+        # The unsafety of having no foreground window is real but is already covered:
+        # the guard separately requires that OUR window is the foreground one, so it
+        # stops for the accurate reason instead of inventing a lock.
+        return None
+    info = _info(hwnd)
+    if info and info.process.lower() in LOCK_PROCESSES:
+        return info.process
+    return None
 
 
 def foreground() -> Optional[WindowInfo]:
@@ -172,29 +360,64 @@ def is_foreground(hwnd: int) -> bool:
     return user32.GetForegroundWindow() == hwnd
 
 
-def focus(hwnd: int) -> bool:
+def _nudge_input() -> None:
+    """Emit one harmless keystroke so this process becomes the last input source.
+
+    Windows refuses SetForegroundWindow from a process that did not produce the most
+    recent input -- that is the anti-focus-stealing rule. A process that HAS just
+    produced input is permitted, so tapping a modifier that does nothing on its own
+    buys the right to raise a window. This is the documented, non-kernel way; it uses
+    the same SendInput path as everything else rather than any privileged API.
+    """
+    try:
+        import keys
+        keys.key_down("ctrl")
+        keys.key_up("ctrl")
+    except Exception:
+        pass
+
+
+def focus(hwnd: int, attempts: int = 3) -> bool:
     """Bring a window to the front.
 
     Windows deliberately makes this unreliable -- a background process cannot steal
-    focus. The AttachThreadInput dance below is the standard workaround; it usually
-    works, and callers must check `is_foreground` rather than assume success, because
-    input sent to an unfocused game goes nowhere.
+    focus. Three escalating tactics, checked rather than assumed, because input sent
+    to an unfocused game goes nowhere and every downstream oracle would then report
+    a softlock that is really a focus failure.
     """
     set_dpi_aware()
     SW_RESTORE = 9
     if user32.IsIconic(wt.HWND(hwnd)):
         user32.ShowWindow(wt.HWND(hwnd), SW_RESTORE)
-    if user32.SetForegroundWindow(wt.HWND(hwnd)):
-        return True
-    cur = kernel32.GetCurrentThreadId()
-    target = user32.GetWindowThreadProcessId(wt.HWND(hwnd), None)
-    if target and target != cur:
-        user32.AttachThreadInput(cur, target, True)
-        try:
-            user32.BringWindowToTop(wt.HWND(hwnd))
-            user32.SetForegroundWindow(wt.HWND(hwnd))
-        finally:
-            user32.AttachThreadInput(cur, target, False)
+
+    for attempt in range(attempts):
+        if is_foreground(hwnd):
+            return True
+
+        # 1. Plain request.
+        user32.SetForegroundWindow(wt.HWND(hwnd))
+        if is_foreground(hwnd):
+            return True
+
+        # 2. Become the last input source, then ask again.
+        _nudge_input()
+        user32.SetForegroundWindow(wt.HWND(hwnd))
+        if is_foreground(hwnd):
+            return True
+
+        # 3. Borrow the target thread's input queue.
+        cur = kernel32.GetCurrentThreadId()
+        target = user32.GetWindowThreadProcessId(wt.HWND(hwnd), None)
+        if target and target != cur:
+            user32.AttachThreadInput(cur, target, True)
+            try:
+                user32.BringWindowToTop(wt.HWND(hwnd))
+                user32.SetForegroundWindow(wt.HWND(hwnd))
+            finally:
+                user32.AttachThreadInput(cur, target, False)
+        if is_foreground(hwnd):
+            return True
+        time.sleep(0.25 * (attempt + 1))
     return is_foreground(hwnd)
 
 

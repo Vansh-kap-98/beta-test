@@ -37,6 +37,7 @@
     <span>Moves <b id="moves">20</b></span>
     <span>Goal <b id="goal">1000</b></span>
     <span>Level <b id="level">1</b></span>
+    <button data-testid="pause" id="pauseBtn">Pause</button>
   </div>
   <div id="board"></div>
   <div id="toast"></div>
@@ -64,6 +65,21 @@
       <button data-testid="buy-moves">Get 5 More Moves</button>
       <div style="height:10px"></div>
       <button class="ghost" id="retryBtn" data-testid="retry">Retry Level</button>
+    </div>
+  </div>
+
+  <!--
+    The board's way out. Added because the agent reported "Screen has no way forward
+    or back" as a CRITICAL softlock on the clean build, and it was right: in a
+    chromeless window the board offered swaps and a shuffle and nothing else. Every
+    game in this genre has a pause control, so leaving it out made the fixture
+    unrepresentative in exactly the way the invariant exists to notice.
+  -->
+  <div class="overlay" id="ovPause">
+    <div class="panel">
+      <h2>Paused</h2>
+      <p>Resume to continue playing.</p>
+      <button data-testid="resume" id="resumeBtn">Resume</button>
     </div>
   </div>
 
@@ -212,6 +228,7 @@ function toast(msg) {
 
 async function tap(x, y) {
   if (busy) return;
+  if (document.getElementById("ovPause").classList.contains("show")) return;
   if (!sel) { sel = { x, y }; render(); return; }
   const dx = Math.abs(sel.x - x), dy = Math.abs(sel.y - y);
   if (dx + dy !== 1) { sel = { x, y }; render(); return; }
@@ -247,7 +264,7 @@ function checkEnd() {
 function newLevel(n) {
   level = n; score = 0; moves = 20 + n * 2; goal = 1000 + (n - 1) * 400;
   fill(); sel = null; render();
-  hide("ovWin"); hide("ovLose"); hide("ovStuck");
+  hide("ovWin"); hide("ovLose"); hide("ovStuck"); hide("ovPause");
 }
 
 document.querySelector('[data-testid="tut-ok"]').onclick = () => hide("ovTutorial");
@@ -260,6 +277,29 @@ document.querySelector('[data-testid="buy-moves"]').onclick = () => {
   moves += 5; hide("ovLose"); render();
 };
 document.getElementById("retryBtn").onclick = () => newLevel(level);
+/*
+ * Escape closes a dismissable overlay, as essentially every real game does.
+ *
+ * Added because the agent got genuinely stuck on the pause panel. It is offered every
+ * readable text region as a candidate control -- that is deliberate, since trying one
+ * is how you find out -- and OCR merged the panel's body copy into a candidate called
+ * "resume_to_continue". Tapping text does nothing, the screen never changed, and after
+ * thirteen straight opportunities the model reported a CRITICAL softlock on a clean
+ * build. It was describing the agent's real experience; the cause was our perception,
+ * not the game.
+ *
+ * The agent already emits a `ui_cancel` macro that presses Escape, and the plan's
+ * escape ladder leans on exactly that. A div-based overlay ignoring Escape made the
+ * fixture unrepresentative of the thing the ladder is designed for.
+ */
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (document.getElementById("ovPause").classList.contains("show")) hide("ovPause");
+  else if (document.getElementById("ovTutorial").classList.contains("show")) hide("ovTutorial");
+});
+
+document.getElementById("pauseBtn").onclick = () => show("ovPause");
+document.getElementById("resumeBtn").onclick = () => hide("ovPause");
 document.getElementById("shuffleBtn").onclick = () => {
   // PLANTED BUG: shuffle does nothing, so a dead board is a hard softlock.
   if (BUGS.has("stuckNoShuffle")) { toast("..."); return; }
@@ -271,13 +311,69 @@ if (BUGS.has("tutorialVague")) {
   document.getElementById("tutText").textContent = "Tap things to play.";
 }
 
+/*
+ * The active variant goes in the window title.
+ *
+ * Without it every build of this fixture is called "Sugar Cascade", a bot attaching
+ * by title cannot tell them apart, and a clean run and a planted-bug run can both
+ * measure the same window -- which happened, and produced byte-identical output that
+ * looked like a detector failure rather than the harness fault it was.
+ */
+const VARIANT = bugArg || "clean";
+document.title = "Sugar Cascade [" + VARIANT + "]";
+
 newLevel(1);
 show("ovTutorial");
+
+/*
+ * Ground-truth channel.
+ *
+ * With ?expose=title the page publishes its true board state into document.title,
+ * which an external process can read through GetWindowTextW. That gives a labelled
+ * comparison for the vision pipeline -- the same trick the plan proposes for real
+ * games via BepInEx, where the scene tree labels what the screen reading predicted.
+ * Here the fixture plays the part of the injected scene tree.
+ */
+if (params.get("expose") === "title") {
+  // Kept for compatibility, but the title is VISIBLE to the screen capture in a
+  // chromeless window -- Chrome draws its own titlebar inside the client area -- so
+  // the perception pipeline could read the answer it was being scored against. Use
+  // ?expose=post instead, which sends the same state to the dev server out of band.
+  setInterval(() => {
+    const st = window.__GAME__.state();
+    document.title = "M3|" + VARIANT + "|" + st.score + "|" + st.moves + "|" +
+                     (st.overlay || "-") + "|" + grid.map(v => v === null ? "." : v).join("");
+  }, 200);
+}
+
+/*
+ * The ground-truth channel that cannot be seen on screen.
+ *
+ * Posts the true game state to the dev server, where a measurement process reads it
+ * with an HTTP GET. This is the fixture standing in for an injected scene tree, and
+ * unlike the window title it is structurally invisible to the capture.
+ */
+if (params.get("expose") === "post") {
+  setInterval(() => {
+    const st = window.__GAME__.state();
+    fetch("/truth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        variant: VARIANT, score: st.score, moves: st.moves, goal: st.goal,
+        level: st.level, overlay: st.overlay,
+        grid: grid.map(v => v === null ? "." : v).join(""),
+        validMoveExists: window.__GAME__.validMoveExists(),
+        at: Date.now(),
+      }),
+    }).catch(() => {});
+  }, 200);
+}
 
 // Debug hook, mirroring what a studio would expose for a white-box adapter.
 window.__GAME__ = {
   state: () => ({ score, moves, goal, level, busy,
-                  overlay: ["ovTutorial","ovWin","ovLose","ovStuck"]
+                  overlay: ["ovTutorial","ovWin","ovLose","ovStuck","ovPause"]
                     .find(id => document.getElementById(id).classList.contains("show")) || null }),
   grid: () => grid.slice(),
   validMoveExists: () => anyValidMove(),
